@@ -1,0 +1,58 @@
+name: torch-hcu-main-build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: source
+
+jobs:
+  build:
+    name: build (dtk2610, py3.12)
+    runs-on: hygon-build
+    timeout-minutes: 180
+    container:
+      image: ${{ vars.HARBOR_SITE }}/dev/dev:rockylinux8.6-mpi5.0-gcc13.3-cmake3.29-py3.12-mkl2024.2.0.664
+    env:
+      RESOURCE_SERVER_URL: ${{ vars.RESOURCE_SERVER_URL }}
+      DTK_PKG_URL: ${{ vars.RESOURCE_SERVER_URL }}/dtk-pkg/dtk26.10/DTK-26.10-CentOS8.5-x86_64.tar.gz
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: source
+          fetch-depth: 0
+
+      - name: Install DTK 26.10
+        run: |
+          stage="$(mktemp -d)"
+          trap 'rm -rf -- "${stage}"' EXIT
+          wget --quiet --output-document="${stage}/dtk.tar.gz" -- "${DTK_PKG_URL}"
+          mkdir -p "${stage}/extract"
+          tar -xzf "${stage}/dtk.tar.gz" -C "${stage}/extract"
+          version_file="$(find "${stage}/extract" -type f -path '*/.info/rocm_version' -print -quit)"
+          test -n "${version_file}"
+          installed_version="$(tr -d '.[:space:]' < "${version_file}")"
+          [[ "${installed_version}" == 2610* ]]
+          rm -rf -- /opt/dtk
+          mkdir -p /opt/dtk
+          cp -a -- "${version_file%/.info/rocm_version}/." /opt/dtk/
+
+      - name: Build manylinux wheel
+        run: bash scripts/build_hcu.sh
+
+      - name: Archive wheel
+        run: |
+          destination="/ci_public/pytorch-das/main/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}/dtk2610/py3.12"
+          shopt -s nullglob
+          wheels=(dist/*manylinux*.whl)
+          (( ${#wheels[@]} == 1 )) || { echo "Expected one manylinux wheel, found ${#wheels[@]}" >&2; exit 1; }
+          mkdir -p "${destination}"
+          cp -a -- "${wheels[0]}" "${destination}/"
